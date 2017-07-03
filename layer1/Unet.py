@@ -4,17 +4,25 @@ import os
 import cv2
 from tqdm import tqdm
 
-from keras.models import Sequential
-from keras.layers import Dense, Dropout, Flatten, Conv2D, MaxPooling2D, BatchNormalization
-from keras.callbacks import EarlyStopping, ModelCheckpoint
+from keras.models import Sequential, Model
+from keras.layers import Dense, Dropout, Flatten, Conv2D, MaxPooling2D, BatchNormalization, Input, merge, UpSampling2D, Cropping2D, ZeroPadding2D, Reshape, core, Convolution2D
+from keras.callbacks import EarlyStopping, ModelCheckpoint, LearningRateScheduler
 from keras import optimizers
+from keras import backend as K
+from keras.optimizers import SGD
+from keras.layers.merge import concatenate
 
-from sklearn.cross_validation import KFold
 from sklearn.metrics import fbeta_score
+from sklearn.model_selection import train_test_split
+
 
 x_train = []
 x_test = []
 y_train = []
+
+path = "F:/DS-main/Kaggle-main/Planet Understanding the Amazon from Space/layer1/"
+name = "Unet_BN"
+weights_path = path + name + '.h5'
 
 df_train = pd.read_csv('../input/train_v2.csv')
 df_test = pd.read_csv('../input/sample_submission_v2.csv')
@@ -60,6 +68,7 @@ label_map = {'agriculture': 14,
 
 img_size = 64
 channels = 4 #4 for tiff, 3 for jpeg
+
 for f, tags in tqdm(df_test.values, miniters=1000):
     img = cv2.imread('../input/test-tif-v2/{}.tif'.format(f), -1)
     x_test.append(cv2.resize(img, (img_size, img_size)))
@@ -78,100 +87,154 @@ y_train = np.array(y_train, np.uint8)
 x_train = np.array(x_train, np.float32)/255.
 
 
-#use saved variable to start from here
-
-
 print(x_train.shape)
 print(y_train.shape)
 
-nfolds = 2
+X_train, X_val, Y_train, Y_val = train_test_split(x_train, y_train, test_size=0.2)   
 
-num_fold = 0
-sum_score = 0
+print('Split train: ', len(X_train), len(Y_train))
+print('Split valid: ', len(X_val), len(Y_val))
 
-yfull_test = []
-yfull_train =[]
 
-kf = KFold(len(y_train), n_folds=nfolds, shuffle=True, random_state=1234)
+def get_crop_shape(target, refer):
+        # width, the 3rd dimension
+        cw = (target.get_shape()[2] - refer.get_shape()[2]).value
+        assert (cw >= 0)
+        if cw % 2 != 0:
+            cw1, cw2 = int(cw/2), int(cw/2) + 1
+        else:
+            cw1, cw2 = int(cw/2), int(cw/2)
+        # height, the 2nd dimension
+        ch = (target.get_shape()[1] - refer.get_shape()[1]).value
+        assert (ch >= 0)
+        if ch % 2 != 0:
+            ch1, ch2 = int(ch/2), int(ch/2) + 1
+        else:
+            ch1, ch2 = int(ch/2), int(ch/2)
 
-for train_index, test_index in kf:
-       
-        X_train = x_train[train_index]
-        Y_train = y_train[train_index]
-        X_valid = x_train[test_index]
-        Y_valid = y_train[test_index]
+        return (ch1, ch2), (cw1, cw2)
+    
+def get_unet(n_ch,patch_height,patch_width):
+    concat_axis = 3
 
-        num_fold += 1
-        print('Start KFold number {} from {}'.format(num_fold, nfolds))
-        print('Split train: ', len(X_train), len(Y_train))
-        print('Split valid: ', len(X_valid), len(Y_valid))
-        
-        kfold_weights_path = os.path.join('', 'weights_kfold_' + str(num_fold) + '.h5')
-        
-        model = Sequential()
-        model.add(BatchNormalization(input_shape=(img_size, img_size, channels)))
-        model.add(Conv2D(32, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(Conv2D(32, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(MaxPooling2D(pool_size=(2, 2)))
+    inputs = Input((patch_height, patch_width, n_ch))
+    
+    conv1 = Conv2D(32, (3, 3), padding="same", name="conv1_1", activation="relu", data_format="channels_last")(inputs)
+    conv1 = BatchNormalization()(conv1)
+    conv1 = Conv2D(32, (3, 3), padding="same", activation="relu", data_format="channels_last")(conv1)
+    conv1 = BatchNormalization()(conv1)
+    pool1 = MaxPooling2D(pool_size=(2, 2), data_format="channels_last")(conv1)
+    conv2 = Conv2D(64, (3, 3), padding="same", activation="relu", data_format="channels_last")(pool1)
+    conv2 = BatchNormalization()(conv2)
+    conv2 = Conv2D(64, (3, 3), padding="same", activation="relu", data_format="channels_last")(conv2)
+    conv2 = BatchNormalization()(conv2)
+    pool2 = MaxPooling2D(pool_size=(2, 2), data_format="channels_last")(conv2)
 
-        model.add(BatchNormalization())
-        model.add(Conv2D(64, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(Conv2D(64, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(MaxPooling2D(pool_size=(2, 2)))
-        
-        model.add(BatchNormalization())
-        model.add(Conv2D(128, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(Conv2D(128, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(MaxPooling2D(pool_size=(2, 2)))
-        
-        model.add(BatchNormalization())
-        model.add(Conv2D(256, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(Conv2D(256, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(MaxPooling2D(pool_size=(2, 2)))
-        
-        model.add(BatchNormalization())
-        model.add(Conv2D(512, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(Conv2D(512, kernel_size=(3, 3),padding='same', activation='relu'))
-        model.add(MaxPooling2D(pool_size=(2, 2)))
-        
-        model.add(Flatten())
-        model.add(Dense(512, activation='relu'))
-        model.add(BatchNormalization())
-        model.add(Dense(17, activation='sigmoid'))
+    conv3 = Conv2D(128, (3, 3), padding="same", activation="relu", data_format="channels_last")(pool2)
+    conv3 = BatchNormalization()(conv3)
+    conv3 = Conv2D(128, (3, 3), padding="same", activation="relu", data_format="channels_last")(conv3)
+    conv3 = BatchNormalization()(conv3)
+    pool3 = MaxPooling2D(pool_size=(2, 2), data_format="channels_last")(conv3)
 
-        epochs_arr  = [   20,      5,    5,       5]
-        learn_rates = [0.01, 0.001, 0.0001, 0.00001]
+    conv4 = Conv2D(256, (3, 3), padding="same", activation="relu", data_format="channels_last")(pool3)
+    conv4 = BatchNormalization()(conv4)
+    conv4 = Conv2D(256, (3, 3), padding="same", activation="relu", data_format="channels_last")(conv4)
+    conv4 = BatchNormalization()(conv4)
+    pool4 = MaxPooling2D(pool_size=(2, 2), data_format="channels_last")(conv4)
 
-        for learn_rate, epochs in zip(learn_rates, epochs_arr):
-            opt  = optimizers.Adam(lr=learn_rate)
-            model.compile(loss='binary_crossentropy', # We NEED binary here, since categorical_crossentropy l1 norms the output before calculating loss.
-                          optimizer=opt,
-                          metrics=['accuracy'])
-            callbacks = [EarlyStopping(monitor='val_loss', patience=2, verbose=1),
-                         ModelCheckpoint(kfold_weights_path, monitor='val_loss', save_best_only=True, verbose=1)]
+    conv5 = Conv2D(512, (3, 3), padding="same", activation="relu", data_format="channels_last")(pool4)
+    conv5 = BatchNormalization()(conv5)
+    conv5 = Conv2D(512, (3, 3), padding="same", activation="relu", data_format="channels_last")(conv5)
+    conv5 = BatchNormalization()(conv5)
 
-            model.fit(x = X_train, y= Y_train, validation_data=(X_valid, Y_valid),
-                  batch_size=256, verbose=1, epochs=epochs, callbacks=callbacks, shuffle=True)
-        
-        if os.path.isfile(kfold_weights_path):
-            model.load_weights(kfold_weights_path)
-        
-        
-        p_valid = model.predict(X_valid, batch_size = 128, verbose=1)
-        print(fbeta_score(Y_valid, np.array(p_valid) > 0.2, beta=2, average='samples'))
+    up_conv5 = UpSampling2D(size=(2, 2), data_format="channels_last")(conv5)
+    ch, cw = get_crop_shape(conv4, up_conv5)
+    crop_conv4 = Cropping2D(cropping=(ch,cw), data_format="channels_last")(conv4)
+    up6   = concatenate([up_conv5, crop_conv4], axis=concat_axis)
+    conv6 = Conv2D(256, (3, 3), padding="same", activation="relu", data_format="channels_last")(up6)
+    conv6 = BatchNormalization()(conv6)
+    conv6 = Conv2D(256, (3, 3), padding="same", activation="relu", data_format="channels_last")(conv6)
+    conv6 = BatchNormalization()(conv6)
 
-        p_train = model.predict(x_train, batch_size =128, verbose=1)
-        yfull_train.append(p_train)
-        
-        p_test = model.predict(x_test, batch_size = 128, verbose=1)
-        yfull_test.append(p_test)
+    up_conv6 = UpSampling2D(size=(2, 2), data_format="channels_last")(conv6)
+    ch, cw = get_crop_shape(conv3, up_conv6)
+    crop_conv3 = Cropping2D(cropping=(ch,cw), data_format="channels_last")(conv3)
+    up7   = concatenate([up_conv6, crop_conv3], axis=concat_axis)
+    conv7 = Conv2D(128, (3, 3), padding="same", activation="relu", data_format="channels_last")(up7)
+    conv7 = BatchNormalization()(conv7)
+    conv7 = Conv2D(128, (3, 3), padding="same", activation="relu", data_format="channels_last")(conv7)
+    conv7 = BatchNormalization()(conv7)
 
-result = np.array(yfull_test[0])
-for i in range(1, nfolds):
-    result += np.array(yfull_test[i])
-result /= nfolds
+    up_conv7 = UpSampling2D(size=(2, 2), data_format="channels_last")(conv7)
+    ch, cw = get_crop_shape(conv2, up_conv7)
+    crop_conv2 = Cropping2D(cropping=(ch,cw), data_format="channels_last")(conv2)
+    up8   = concatenate([up_conv7, crop_conv2], axis=concat_axis)
+    conv8 = Conv2D(64, (3, 3), padding="same", activation="relu", data_format="channels_last")(up8)
+    conv8 = BatchNormalization()(conv8)
+    conv8 = Conv2D(64, (3, 3), padding="same", activation="relu", data_format="channels_last")(conv8)
+    conv8 = BatchNormalization()(conv8)
+
+    up_conv8 = UpSampling2D(size=(2, 2), data_format="channels_last")(conv8)
+    ch, cw = get_crop_shape(conv1, up_conv8)
+    crop_conv1 = Cropping2D(cropping=(ch,cw), data_format="channels_last")(conv1)
+    up9   = concatenate([up_conv8, crop_conv1], axis=concat_axis)
+    conv9 = Conv2D(32, (3, 3), padding="same", activation="relu", data_format="channels_last")(up9)
+    conv9 = BatchNormalization()(conv9)
+    conv9 = Conv2D(32, (3, 3), padding="same", activation="relu", data_format="channels_last")(conv9)
+    conv9 = BatchNormalization()(conv9)
+
+    #ch, cw = get_crop_shape(inputs, conv9)
+    #conv9  = ZeroPadding2D(padding=(ch[0],cw[0]), data_format="channels_last")(conv9)
+    #conv10 = Conv2D(1, (1, 1), data_format="channels_last", activation="sigmoid")(conv9)
+    #•conv10 = BatchNormalization()(conv10)
+    
+    flatten =  Flatten()(conv9)
+    dense1 = Dense(512, activation='relu')(flatten)
+    dense1 = BatchNormalization()(dense1)
+    dense2 = Dense(17, activation='sigmoid')(dense1)
+    
+    model = Model(input=inputs, output=dense2)
+    
+    return model
+
+
+model = get_unet(channels, img_size, img_size)
+
+
+epochs_arr  = [  100,     50,     20,      10]
+learn_rates = [0.001, 0.0003, 0.0001, 0.00003]
+patience    = [    5,      5,      5,       3]
+
+for learn_rate, epochs, patience in zip(learn_rates, epochs_arr, patience):
+    if os.path.isfile(weights_path):
+        print("loading existing weight for training")
+        model.load_weights(weights_path)
+    
+    opt  = optimizers.Adam(lr=learn_rate)
+    model.compile(loss='binary_crossentropy', # We NEED binary here, since categorical_crossentropy l1 norms the output before calculating loss.
+                  optimizer=opt,
+                  metrics=['accuracy'])
+    callbacks = [EarlyStopping(monitor='val_loss', patience=patience, verbose=1),
+                 ModelCheckpoint(weights_path, monitor='val_loss', save_best_only=True, verbose=2)]
+
+    model.fit(x = X_train, y= Y_train, validation_data=(X_val, Y_val),
+          batch_size=256, verbose=2, epochs=epochs, callbacks=callbacks, shuffle=True)
+
+if os.path.isfile(weights_path):
+    model.load_weights(weights_path)
+
+
+p_val = model.predict(X_val, batch_size = 256, verbose=1)
+print("fbeta score ", fbeta_score(Y_val, np.array(p_val) > 0.2, beta=2, average='samples'))
+
+p_test = model.predict(x_test, batch_size = 256, verbose=1)
+
+
+
+
+
+result = p_test
 result = pd.DataFrame(result, columns = labels)
-result
 
 from tqdm import tqdm
 thres = [0.07, 0.17, 0.2, 0.04, 0.23, 0.33, 0.24, 0.22, 0.1, 0.19, 0.23, 0.24, 0.12, 0.14, 0.25, 0.26, 0.16]
@@ -185,6 +248,5 @@ for i in tqdm(range(result.shape[0]), miniters=1000):
     preds.append(' '.join(list(a.index)))
     
 df_test['tags'] = preds
-df_test.to_csv('F:/DS-main/Kaggle-main/Planet Understanding the Amazon from Space/submission_keras_1morelater_allBN_2fold_tiff_64size128batch.csv', index=False)
+df_test.to_csv('F:/DS-main/Kaggle-main/Planet Understanding the Amazon from Space/submission_'+ name + '.csv', index=False)
 
-## 0.913
